@@ -2,13 +2,13 @@ import type { LoaderFunction } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import { useLoaderData } from "@remix-run/react";
 import { getRecommendedProducts } from "~/services/recommendation.server";
-import { getUserSession } from "~/utils/session.server";
+import { authenticator } from "~/utils/auth.server";
 import { PrismaClient } from "@prisma/client"
 
 const prisma = new PrismaClient();
 
 export const loader: LoaderFunction = async ({ request }) => {
-  const user = await getUserSession(request);
+  const user = await authenticator.isAuthenticated(request);
   const products = await prisma.product.findMany();
   const recommendations = await getRecommendedProducts(user.id);
   
