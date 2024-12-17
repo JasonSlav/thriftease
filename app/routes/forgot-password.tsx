@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import image from "../foto/img2.png";
 
 export default function ForgotPassword() {
   const [email, setEmail] = useState('');
@@ -26,8 +27,10 @@ export default function ForgotPassword() {
   };
 
   return (
-    <div>
-      <h1>Forgot Password</h1>
+    <div className="flex items-center justify-center min-h-screen bg-white">
+      <div className="bg-white p-6 text-center">
+      <h1 className="text-2xl font-bold mb-4">Pemulihan Akun</h1>
+      <img src={image} alt="Illustration" className="mx-auto mb-4" />
       <form onSubmit={handleSubmit}>
         <input
           type="email"
@@ -35,10 +38,13 @@ export default function ForgotPassword() {
           onChange={(e) => setEmail(e.target.value)}
           placeholder="Enter your email"
           required
+          className="w-full p-3 border border-gray-300 rounded mb-4"
+
         />
-        <button type="submit">Send Reset Link</button>
+        <button type="submit" className="w-full p-3 bg-yellow-300 text-black font-bold rounded shadow-md hover:bg-yellow-400" >Send Reset Link</button>
       </form>
       {message && <p>{message}</p>}
+    </div>
     </div>
   );
 }
