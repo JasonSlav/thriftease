@@ -51,7 +51,7 @@ export default function AdminLogin() {
         <div className="mb-8">
           <img src="/app/foto/ri_admin-fill.png" alt="Logo Admin" />
         </div>
-        <h1 className="text-2xl font-bold mb-6">Admin Logi</h1>
+        <h1 className="text-2xl font-bold mb-6">Admin Login</h1>
 
         {actionData?.error && (
           <div className="rounded-md bg-red-50 p-4">
