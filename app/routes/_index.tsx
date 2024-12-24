@@ -104,7 +104,7 @@ export default function Index() {
             Jelajahi Gaya Thrift Terbaik
           </h1>
           <img
-            src="/app/foto/Group 210.png"
+            src="uploads/Group 210.png"
             alt="Woman in denim jacket"
             className="rounded-full w-16 h-16"
           />
