@@ -1,311 +1,345 @@
-import { LoaderFunction, ActionFunction, json } from "@remix-run/node";
-import { useLoaderData, useNavigate } from "@remix-run/react";
-import { PrismaClient } from "@prisma/client";
+import { useState, useEffect } from "react";
+import { Form, useNavigate, useActionData, useNavigation } from "@remix-run/react";
+import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
+import { json, redirect } from "@remix-run/node";
 import { authenticator } from "~/utils/auth.server";
-import React, { useState } from "react";
+import { createUserSession } from "~/utils/session.server";
+import image from "../foto/pngwing.com(6).png";
 
-const prisma = new PrismaClient();
-
-export const loader: LoaderFunction = async ({ request }) => {
+// Loader Function
+export async function loader({ request }: LoaderFunctionArgs) {
   const user = await authenticator.isAuthenticated(request);
+  if (user) return redirect('/');
+  return null;
+}
 
-  if (!user) {
-    throw new Response("User is not authenticated", { status: 401 });
-  }
-
-  const url = new URL(request.url);
-  const id = url.searchParams.get("id");
-
-  if (!id) {
-    throw new Response("Product ID is required", { status: 400 });
-  }
-
-  const product = await prisma.product.findUnique({
-    where: { id: String(id) },
-    include: { images: true },
-  });
-
-  if (!product) {
-    throw new Response("Product not found", { status: 404 });
-  }
-
-  return json({ product, userId: user.id });
+// Action Function
+type AuthUser = {
+  id: string;
+  role: string;
+  // tambahkan properti lain jika diperlukan
 };
 
-export const action: ActionFunction = async ({ request }) => {
-  const user = await authenticator.isAuthenticated(request);
+// Action Function untuk /login
+export const action = async ({ request }: ActionFunctionArgs) => {
+  try {
+    const user = await authenticator.authenticate("form", request, {
+      failureRedirect: "/login", // Jangan gunakan successRedirect di sini
+    }) as AuthUser;
 
-  if (!user) {
-    throw new Response("User is not authenticated", { status: 401 });
-  }
-
-  const formData = await request.formData();
-  const productId = formData.get("productId") as string;
-
-  if (!productId) {
-    return json({ error: "Product ID is required" }, { status: 400 });
-  }
-
-  // Get product to check stock
-  const product = await prisma.product.findUnique({
-    where: { id: productId },
-  });
-
-  if (!product) {
-    return json({ error: "Produk tidak ditemukan" }, { status: 404 });
-  }
-
-  let cart = await prisma.cart.findUnique({
-    where: { userId: user.id },
-  });
-
-  if (!cart) {
-    cart = await prisma.cart.create({
-      data: { userId: user.id },
-    });
-  }
-
-  const existingCartItem = await prisma.cartItem.findFirst({
-    where: { cartId: cart.id, productId },
-  });
-
-  if (existingCartItem) {
-    // If item exists, check if we can add more (only if quantity < stock)
-    if (existingCartItem.quantity < product.stock) {
-      // Update quantity normally
-      await prisma.cartItem.update({
-        where: { id: existingCartItem.id },
-        data: { 
-          quantity: existingCartItem.quantity + 1,
-          updatedAt: new Date() // Update timestamp to sort to top
-        },
-      });
-    } else {
-      // Item exists but stock is full, just update timestamp to move to top
-      await prisma.cartItem.update({
-        where: { id: existingCartItem.id },
-        data: { 
-          updatedAt: new Date() // Only update timestamp to sort to top
-        },
-      });
+    // Cek apakah user adalah admin
+    if (user.role === "ADMIN") {
+      return json({ 
+        error: "Admin tidak dapat login melalui halaman ini. Silakan gunakan halaman login admin.",
+        errorType: "admin_access"
+      }, { status: 403 });
     }
-  } else {
-    // Create new cart item
-    await prisma.cartItem.create({
-      data: {
-        cartId: cart.id,
-        productId,
-        quantity: 1,
-      },
-    });
-  }
 
-  return json({ success: true });
-};
-
-const DetailProdukPage = () => {
-  const { product } = useLoaderData<typeof loader>();
-  const [feedback, setFeedback] = useState("");
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const navigate = useNavigate();
-  const [showFeedback, setShowFeedback] = useState(false);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  const nextImage = () => {
-    setCurrentIndex((prevIndex) =>
-      prevIndex === product.images.length - 1 ? 0 : prevIndex + 1
-    );
-  };
-
-  const prevImage = () => {
-    setCurrentIndex((prevIndex) =>
-      prevIndex === 0 ? product.images.length - 1 : prevIndex - 1
-    );
-  };
-
-  const handleAddToCart = async (e: React.FormEvent) => {
-    e.preventDefault();
+    // Hanya user biasa yang bisa login melalui halaman ini
+    return createUserSession(user.id, "/");
     
-    // Prevent multiple submissions
-    if (isSubmitting) return;
-    
-    setIsSubmitting(true);
-    
-    const formData = new FormData(e.currentTarget as HTMLFormElement);
-
-    try {
-      const response = await fetch(window.location.href, {
-        method: "POST",
-        body: formData,
-      });
-
-      // Check if response is ok first
-      if (response.ok) {
-        setFeedback("Produk berhasil ditambahkan ke keranjang!");
-      } else {
-        // Try to parse JSON for error message
-        try {
-          const result = await response.json();
-          setFeedback(result.error || "Terjadi kesalahan.");
-        } catch (jsonError) {
-          // If JSON parsing fails, use status-based message
-          if (response.status === 400) {
-            setFeedback("Data tidak valid.");
-          } else if (response.status === 401) {
-            setFeedback("Anda perlu login terlebih dahulu.");
-          } else if (response.status === 404) {
-            setFeedback("Produk tidak ditemukan.");
-          } else {
-            setFeedback("Terjadi kesalahan pada server.");
-          }
-        }
+  } catch (error) {
+    if (error instanceof Response) {
+      // Jika authentication gagal, kembalikan pesan error yang jelas
+      return json({ 
+        error: "Email/Username atau password yang Anda masukkan salah. Silakan periksa kembali dan coba lagi.",
+        errorType: "auth_failed"
+      }, { status: 401 });
+    } else if (error instanceof Error) {
+      console.log("Error:", error.message);
+      
+      // Cek jenis error yang lebih spesifik
+      if (error.message.includes("Invalid credentials") || 
+          error.message.includes("User not found") ||
+          error.message.includes("Password incorrect")) {
+        return json({ 
+          error: "Email/Username atau password yang Anda masukkan salah. Pastikan data yang dimasukkan benar.",
+          errorType: "auth_failed"
+        }, { status: 401 });
       }
       
-      setShowFeedback(true);
-      setTimeout(() => {
-        setShowFeedback(false);
-      }, 3000);
-    } catch (error) {
-      console.error("Network error:", error);
-      setFeedback("Terjadi kesalahan jaringan.");
-      setShowFeedback(true);
-      setTimeout(() => {
-        setShowFeedback(false);
-      }, 3000);
-    } finally {
-      // Re-enable button after a short delay to prevent spam
-      setTimeout(() => {
-        setIsSubmitting(false);
-      }, 1000);
+      return json({ 
+        error: "Terjadi kesalahan saat login. Silakan periksa kembali data Anda dan coba lagi.",
+        errorType: "auth_failed"
+      }, { status: 401 });
+    } else {
+      return json({ 
+        error: "Terjadi kesalahan sistem. Silakan coba lagi dalam beberapa saat.",
+        errorType: "system_error"
+      }, { status: 500 });
     }
+  }
+};
+
+// Login Component
+const LoginPage = () => {
+  const [showPassword, setShowPassword] = useState(false);
+  const [showErrorPopup, setShowErrorPopup] = useState(false);
+  const [inputErrors, setInputErrors] = useState({
+    login: false,
+    password: false
+  });
+  const actionData = useActionData<{ error?: string; errorType?: string }>();
+  const navigation = useNavigation();
+  const navigate = useNavigate();
+
+  const isSubmitting = navigation.state === "submitting";
+
+  useEffect(() => {
+    if (actionData?.error && !isSubmitting) {
+      setShowErrorPopup(true);
+      
+      // Highlight input fields jika auth failed
+      if (actionData.errorType === "auth_failed") {
+        setInputErrors({
+          login: true,
+          password: true
+        });
+      }
+    } else {
+      // Reset input errors jika tidak ada error
+      setInputErrors({
+        login: false,
+        password: false
+      });
+    }
+  }, [actionData?.error, actionData?.errorType, isSubmitting]);
+
+  const togglePasswordVisibility = () => {
+    setShowPassword((prevState) => !prevState);
+  };
+
+  const handleInputChange = () => {
+    // Reset input errors ketika user mulai mengetik
+    if (inputErrors.login || inputErrors.password) {
+      setInputErrors({
+        login: false,
+        password: false
+      });
+    }
+  };
+
+  const getErrorIcon = () => {
+    switch (actionData?.errorType) {
+      case "admin_access":
+        return (
+          <svg className="w-16 h-16 mx-auto" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>
+          </svg>
+        );
+      case "system_error":
+        return (
+          <svg className="w-16 h-16 mx-auto" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+          </svg>
+        );
+      default: // auth_failed
+        return (
+          <svg className="w-16 h-16 mx-auto" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+          </svg>
+        );
+    }
+  };
+
+  const getErrorTitle = () => {
+    switch (actionData?.errorType) {
+      case "admin_access":
+        return "Akses Ditolak";
+      case "system_error":
+        return "Kesalahan Sistem";
+      default:
+        return "Login Gagal";
+    }
+  };
+
+  const closeErrorPopup = () => {
+    setShowErrorPopup(false);
   };
 
   return (
-    <div className="flex flex-col min-h-screen bg-white relative">
-      {/* Overlay feedback - Fixed z-index issue */}
-      {showFeedback && (
-        <div className="fixed top-4 left-0 w-full flex justify-center items-center z-[60] pointer-events-none">
-          <div className={`px-4 py-2 rounded shadow-lg transition-opacity duration-300 ${
-            feedback.includes('berhasil') 
-              ? 'bg-green-200 text-green-800' 
-              : 'bg-red-200 text-red-800'
+    <div className="flex items-center justify-center min-h-screen">
+      <div className="flex flex-col items-center w-full max-w-md p-4">
+        <div className="mb-8">
+          <i className="fas fa-user-circle text-9xl text-gray-400"></i>
+        </div>
+        <h1 className="text-2xl font-bold mb-6">Login Account</h1>
+
+        <Form action="/login" method="post" className="w-full">
+          <div className={`flex items-center border rounded-lg p-2 mb-4 transition-colors duration-200 ${
+            inputErrors.login 
+              ? 'border-red-500 bg-red-50' 
+              : 'border-black hover:border-gray-600 focus-within:border-blue-500'
           }`}>
-            {feedback}
-          </div>
-        </div>
-      )}
-
-      <header className="sticky top-0 flex justify-between items-center p-4 bg-white z-50 shadow">
-        <button
-          onClick={() => navigate(-1)}
-          className="w-8 h-8 lg:w-10 lg:h-10 bg-yellow-300 rounded-full flex items-center justify-center"
-        >
-          <i className="fas fa-arrow-left"></i>
-        </button>
-        <div className="relative flex space-x-4">
-          <button onClick={() => navigate("/cart")} className="text-yellow-400">
-            <i className="fas fa-shopping-cart"></i>
-          </button>
-        </div>
-      </header>
-
-      <main className="flex-grow px-6 py-4">
-        <div className="relative flex justify-center items-center py-4">
-          <button
-            onClick={prevImage}
-            className="absolute left-0 text-black p-2"
-          >
-            <i className="fas fa-chevron-left"></i>
-          </button>
-          <img
-            src={
-              product.images.length > 0
-                ? product.images[currentIndex]?.url
-                : "https://placehold.co/300x300?text=No+Image"
-            }
-            alt={`Product ${currentIndex + 1}`}
-            className="w-56 h-56 md:w-64 md:h-64 object-cover"
-          />
-          <button
-            onClick={nextImage}
-            className="absolute right-0 text-black p-2"
-          >
-            <i className="fas fa-chevron-right"></i>
-          </button>
-        </div>
-
-        <div className="flex justify-center space-x-2 mb-4">
-          {product.images.map((_: { url: string }, index: number) => (
-            <div
-              key={index}
-              className={`w-3 h-3 rounded-full ${
-                index === currentIndex ? "bg-yellow-300" : "bg-gray-300"
+            <i className={`fa fa-user mr-2 ${inputErrors.login ? 'text-red-500' : 'text-gray-400'}`}></i>
+            <input
+              type="text"
+              name="login"
+              placeholder="Email/Username"
+              required
+              disabled={isSubmitting}
+              onChange={handleInputChange}
+              className={`flex-1 outline-none disabled:bg-gray-100 ${
+                inputErrors.login 
+                  ? 'text-red-700 placeholder-red-400 bg-red-50' 
+                  : 'text-gray-500'
               }`}
-            ></div>
-          ))}
-        </div>
-
-        <div className="bg-gray-100 p-6">
-          <h1 className="text-md sm:text-lg md:text-xl font-semibold">
-            {product.name}
-          </h1>
-          <p className="text-xs sm:text-sm md:text-base text-gray-500 mt-2">
-            Size: {product.size || "N/A"}
-          </p>
-          <div className="flex justify-between items-center mt-3">
-            <span className="text-yellow-500 text-md sm:text-lg md:text-xl font-bold">
-              Rp {product.price.toLocaleString()}
-            </span>
-            <span className="text-gray-500 text-xs sm:text-sm md:text-base">
-              Stok: {product.stock}
-            </span>
+            />
           </div>
-        </div>
+          
+          <div className={`flex items-center border rounded-lg p-2 mb-2 transition-colors duration-200 ${
+            inputErrors.password 
+              ? 'border-red-500 bg-red-50' 
+              : 'border-black hover:border-gray-600 focus-within:border-blue-500'
+          }`}>
+            <i className={`fas fa-lock mr-2 ${inputErrors.password ? 'text-red-500' : 'text-gray-400'}`}></i>
+            <input
+              type={showPassword ? "text" : "password"}
+              name="password"
+              required
+              placeholder="Password"
+              disabled={isSubmitting}
+              onChange={handleInputChange}
+              className={`flex-1 outline-none disabled:bg-gray-100 ${
+                inputErrors.password 
+                  ? 'text-red-700 placeholder-red-400 bg-red-50' 
+                  : 'text-gray-500'
+              }`}
+            />
+            <button
+              type="button"
+              aria-label={showPassword ? "Sembunyikan password" : "Tampilkan password"}
+              className="focus:outline-none ml-2"
+              onClick={togglePasswordVisibility}
+              disabled={isSubmitting}
+              tabIndex={0}
+            >
+              <i
+                className={`fas ${showPassword ? "fa-eye-slash" : "fa-eye"} ${
+                  inputErrors.password ? 'text-red-500' : 'text-gray-400'
+                }`}
+                aria-hidden="true"
+              ></i>
+            </button>
+          </div>
 
-        <div className="mt-6">
-          <h2 className="text-sm sm:text-md md:text-lg font-bold">
-            DETAIL PRODUK
-          </h2>
-          <ul className="list-disc list-inside text-xs sm:text-sm md:text-base text-gray-700 mt-2">
-            {product.description.split("\n").map((detail: string, index: number) => (
-              <li key={index}>{detail}</li>
-            ))}
-          </ul>
-        </div>
-      </main>
+          {/* Pesan error inline untuk auth failed */}
+          {actionData?.errorType === "auth_failed" && !showErrorPopup && (
+            <div className="text-red-600 text-sm mb-3 p-2 bg-red-50 border border-red-200 rounded flex items-center">
+              <i className="fas fa-exclamation-triangle mr-2"></i>
+              <span>Email/Username atau password salah</span>
+            </div>
+          )}
 
-      <footer className="sticky bottom-0 bg-yellow-300 flex justify-center items-center shadow z-40">
-        <form onSubmit={handleAddToCart}>
-          <input type="hidden" name="productId" value={product.id} />
+          <button
+            type="button"
+            className="float-right mb-2 text-gray-300 hover:text-gray-500 disabled:pointer-events-none"
+            onClick={() => navigate("/forgot-password")}
+            disabled={isSubmitting}
+          >
+            Lupa sandi ?
+          </button>
+
           <button
             type="submit"
-            disabled={isSubmitting || product.stock === 0}
-            className={`text-black text-xs sm:text-sm font-bold py-3 px-6 rounded-full flex flex-col items-center space-y-1 transition-opacity ${
-              isSubmitting || product.stock === 0 
-                ? 'opacity-50 cursor-not-allowed' 
-                : 'hover:opacity-80'
-            }`}
+            disabled={isSubmitting}
+            className="w-full bg-yellow-300 text-black font-bold py-2 rounded-lg mb-6 shadow-lg hover:bg-yellow-400 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors duration-200"
           >
-            <div className="border-2 border-black rounded-lg pt-1 pb-1 pl-3 pr-3">
-              {isSubmitting ? (
-                <i className="fas fa-spinner fa-spin"></i>
-              ) : (
-                <i className="fas fa-plus"></i>
-              )}
-            </div>
-            <span>
-              {product.stock === 0 
-                ? 'Stok Habis' 
-                : isSubmitting 
-                  ? 'Menambahkan...' 
-                  : 'Tambahkan ke Keranjang'
-              }
-            </span>
+            {isSubmitting ? (
+              <div className="flex items-center justify-center">
+                <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-black" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                Memproses...
+              </div>
+            ) : (
+              "Login"
+            )}
           </button>
-        </form>
-      </footer>
+        </Form>
+
+        <Form action="/auth/google" method="post" className="w-full">
+          <button
+            type="submit"
+            disabled={isSubmitting}
+            className="w-full bg-white text-black font-bold py-2 rounded-lg mb-6 shadow-lg flex items-center justify-center space-x-2 hover:bg-gray-50 disabled:bg-gray-100 disabled:cursor-not-allowed transition-colors duration-200"
+          >
+            <img src={image} alt="Google Logo" className="w-5 h-5" />
+            <span>Login dengan Google</span>
+          </button>
+        </Form>
+
+        <div className="text-center mb-4">
+          <span className="text-gray-500">Belum terdaftar? </span>
+          <button
+            type="button"
+            onClick={() => navigate("/register")}
+            disabled={isSubmitting}
+            className="text-yellow-300 font-bold underline hover:text-yellow-400 disabled:pointer-events-none"
+          >
+            Buat akun
+          </button>
+        </div>
+        <div className="text-center text-gray-500">
+          <p>
+            Copyright <i className="far fa-copyright"></i> 2024 ThriftEase
+          </p>
+        </div>
+
+        {/* Pop-up Error yang Diperbaiki */}
+        {showErrorPopup && actionData?.error && (
+          <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-50">
+            <div className="bg-white border-2 border-red-600 p-6 rounded-lg w-80 max-w-sm mx-4 text-center shadow-2xl">
+              <div className="text-red-600 mb-4">
+                {getErrorIcon()}
+              </div>
+              <h2 className="text-xl font-semibold text-red-600 mb-2">
+                {getErrorTitle()}
+              </h2>
+              <p className="text-gray-600 mb-4 text-sm leading-relaxed">
+                {actionData.error}
+              </p>
+              
+              {/* Tombol aksi berdasarkan jenis error */}
+              <div className="flex flex-col space-y-2">
+                <button
+                  className="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 transition-colors duration-200"
+                  onClick={closeErrorPopup}
+                >
+                  {actionData.errorType === "auth_failed" ? "Coba Lagi" : "Tutup"}
+                </button>
+                
+                {actionData.errorType === "admin_access" && (
+                  <button
+                    className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 transition-colors duration-200"
+                    onClick={() => {
+                      setShowErrorPopup(false);
+                      navigate("/admin/login");
+                    }}
+                  >
+                    Login sebagai Admin
+                  </button>
+                )}
+                
+                {actionData.errorType === "auth_failed" && (
+                  <button
+                    className="bg-gray-600 text-white px-4 py-2 rounded hover:bg-gray-700 transition-colors duration-200"
+                    onClick={() => {
+                      setShowErrorPopup(false);
+                      navigate("/forgot-password");
+                    }}
+                  >
+                    Lupa Password?
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 };
 
-export default DetailProdukPage;
+export default LoginPage;
