@@ -60,7 +60,13 @@ export const action: ActionFunction = async ({ request }) => {
           username,
           password: hashedPassword,
           fullName,
-          role: "ADMIN"
+          role: "ADMIN",
+          province: "", // Provide appropriate default or form value
+          city: "",
+          district: "",
+          postalCode: "",
+          address: "", // Add any other required fields here
+          phoneNumber: "" // Provide appropriate default or form value
         }
       });
 
