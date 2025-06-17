@@ -3,8 +3,7 @@ import { json, redirect } from "@remix-run/node";
 import type { ActionFunction, LoaderFunction } from "@remix-run/node";
 import { authenticator } from "~/utils/auth.server";
 import { sessionStorage } from "~/utils/session.server";
-import { useState } from "react"; // Import useState
-import image from "../foto/ri_admin-fill.png";
+import { useState } from "react";
 
 export const loader: LoaderFunction = async ({ request }) => {
   const user = await authenticator.isAuthenticated(request);
@@ -50,7 +49,7 @@ export default function AdminLogin() {
     <div className="flex items-center justify-center min-h-screen">
       <div className="flex flex-col items-center w-full max-w-md p-4">
         <div className="mb-8">
-          <img src={image} alt="Logo Admin" />
+          <img src="/app/foto/ri_admin-fill.png" alt="Logo Admin" />
         </div>
         <h1 className="text-2xl font-bold mb-6">Admin Login</h1>
 
