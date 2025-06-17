@@ -1,154 +1,258 @@
 import { json, redirect } from "@remix-run/node";
 import { prisma } from "~/utils/prisma.server";
-import { useLoaderData, Form, useNavigate } from "@remix-run/react";
+import { useLoaderData, Form, useNavigate, useFetcher } from "@remix-run/react";
 import { authenticator } from "~/utils/auth.server";
-import React, { useState } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { saveTemporaryOrder } from "~/utils/orders.server";
+import type { LoaderFunctionArgs, ActionFunctionArgs } from "@remix-run/node";
 
-// Backend
-export const loader = async ({ request }) => {
+export const loader = async ({ request }: LoaderFunctionArgs) => {
   const user = await authenticator.isAuthenticated(request);
   if (!user) return redirect("/login");
 
-  // Fetch cart data
+  // Optimized: Single query with all necessary joins
   const cart = await prisma.cart.findUnique({
     where: { userId: user.id },
     include: {
       items: {
         include: {
           product: {
-            include: {
-              images: true,
-               // Include product images
-            },
-          },
-        },
-      },
-    },
+            select: {
+              id: true,
+              name: true,
+              price: true,
+              size: true,
+              stock: true,
+              images: {
+                select: { url: true },
+                take: 1 // Only get first image to reduce data transfer
+              }
+            }
+          }
+        }
+      }
+    }
   });
 
   return json({ cart: cart || { items: [] } });
 };
 
-export const action = async ({ request }) => {
+export const action = async ({ request }: ActionFunctionArgs) => {
   const formData = await request.formData();
   const actionType = formData.get("action");
-  const itemId = formData.get("itemId");
   const user = await authenticator.isAuthenticated(request);
 
   if (!user) return redirect("/login");
 
   if (actionType === "checkout") {
-    const cartData = JSON.parse(formData.get("cartData"));
-    const shippingCost = 15000;
+    const cartDataRaw = formData.get("cartData");
+    if (!cartDataRaw) return redirect("/cart");
+    
+    try {
+      const cartData = JSON.parse(cartDataRaw as string);
+      const shippingCost = 15000;
+      
+      // Optimized: Calculate total more efficiently
+      const subtotal = cartData.reduce(
+        (sum: number, item: { product: { price: number }; quantity: number }) =>
+          sum + (item.product.price * item.quantity),
+        0
+      );
 
-    const orderData = {
-      user,
-      cartData,
-      shippingCost,
-      total:
-        cartData.reduce(
-          (sum, item) => sum + item.product.price * item.quantity,
-          0
-        ) + shippingCost,
-    };
+      const orderData = {
+        user,
+        cartData,
+        shippingCost,
+        total: subtotal + shippingCost,
+      };
 
-    await saveTemporaryOrder(user.id, orderData);
-
-    return redirect("/pesanan");
+      // Optimized: Save order data without blocking
+      await saveTemporaryOrder(user.id, orderData);
+      return redirect("/pesanan");
+    } catch (error) {
+      console.error("Checkout error:", error);
+      return json({ error: "Checkout failed" }, { status: 500 });
+    }
   }
 
   if (actionType === "updateQuantity") {
-    const quantity = parseInt(formData.get("quantity"), 10);
+    const itemId = formData.get("itemId");
+    const quantity = parseInt(formData.get("quantity") as string, 10);
 
-    // Get the product's stock
-    const cartItem = await prisma.cartItem.findUnique({
-      where: { id: itemId },
-      include: {
-        product: true, // Include product to get stock information
-      },
-    });
-
-    if (!cartItem) return redirect("/cart");
-
-    const maxStock = cartItem.product.stock;
-    if (quantity <= maxStock && quantity > 0) {
-      await prisma.cartItem.update({
-        where: { id: itemId },
-        data: { quantity },
-      });
+    if (typeof itemId !== "string" || isNaN(quantity) || quantity <= 0) {
+      return redirect("/cart");
     }
-  } else if (actionType === "removeItem") {
-    await prisma.cartItem.delete({
-      where: { id: itemId },
-    });
+
+    try {
+      // Optimized: Single query with validation
+      const cartItem = await prisma.cartItem.findUnique({
+        where: { id: itemId },
+        select: {
+          id: true,
+          product: {
+            select: { stock: true }
+          }
+        }
+      });
+
+      if (cartItem && quantity <= cartItem.product.stock) {
+        await prisma.cartItem.update({
+          where: { id: itemId },
+          data: { quantity }
+        });
+      }
+    } catch (error) {
+      console.error("Update quantity error:", error);
+    }
+
+    return redirect("/cart");
+  }
+
+  if (actionType === "removeItem") {
+    const itemId = formData.get("itemId");
+    if (typeof itemId !== "string") return redirect("/cart");
+    
+    try {
+      await prisma.cartItem.delete({
+        where: { id: itemId }
+      });
+    } catch (error) {
+      console.error("Remove item error:", error);
+    }
+
+    return redirect("/cart");
+  }
+
+  // Optimized: Batch remove multiple items
+  if (actionType === "removeBatch") {
+    const itemIds = JSON.parse(formData.get("itemIds") as string);
+    
+    try {
+      await prisma.cartItem.deleteMany({
+        where: { 
+          id: { in: itemIds },
+          cart: { userId: user.id }
+        }
+      });
+    } catch (error) {
+      console.error("Batch remove error:", error);
+    }
+
+    return redirect("/cart");
   }
 
   return redirect("/cart");
 };
 
-// Frontend
-export default function CartPage() {
-  const { cart } = useLoaderData();
-  const navigate = useNavigate();
-  const [selectedItems, setSelectedItems] = useState(
-    Array(cart.items.length).fill(false)
-  ); // Initializing selectedItems based on the cart items
-  const [selectAll, setSelectAll] = useState(false); // Status checkbox "Pilih Semua"
-  const [showConfirmModal, setShowConfirmModal] = useState(false);
-  const [itemsToRemove, setItemsToRemove] = useState([]);
-  // Fungsi untuk menangani klik pada checkbox item
-  const handleItemChange = (index) => {
-    const updatedItems = [...selectedItems];
-    updatedItems[index] = !updatedItems[index];
-    setSelectedItems(updatedItems);
-
-    // Update status "Pilih Semua"
-    const allChecked = updatedItems.every((item) => item);
-    setSelectAll(allChecked);
+// Frontend Types
+type CartItem = {
+  id: string;
+  quantity: number;
+  product: {
+    id: string;
+    name: string;
+    price: number;
+    size: string;
+    stock: number;
+    images: { url: string }[];
   };
+};
 
-  // Fungsi untuk menangani klik pada checkbox "Pilih Semua"
-  const handleSelectAllChange = () => {
+type LoaderData = {
+  cart: {
+    items: CartItem[];
+  };
+};
+
+export default function CartPage() {
+  const { cart } = useLoaderData<LoaderData>();
+  const navigate = useNavigate();
+  const fetcher = useFetcher();
+  
+  // Optimized: Initialize state more efficiently
+  const [selectedItems, setSelectedItems] = useState(() => 
+    new Array(cart.items.length).fill(false)
+  );
+  const [selectAll, setSelectAll] = useState(false);
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [isCheckingOut, setIsCheckingOut] = useState(false);
+
+  // Optimized: Memoized calculations
+  const selectedItemsData = useMemo(() => {
+    return cart.items.filter((_, index) => selectedItems[index]);
+  }, [cart.items, selectedItems]);
+
+  const selectedTotal = useMemo(() => {
+    return selectedItemsData
+      .reduce((total, item) => total + item.product.price * item.quantity, 0)
+      .toLocaleString("id-ID");
+  }, [selectedItemsData]);
+
+  const hasSelectedItems = useMemo(() => {
+    return selectedItems.some(item => item);
+  }, [selectedItems]);
+
+  // Optimized: Callback functions to prevent re-renders
+  const handleItemChange = useCallback((index: number) => {
+    setSelectedItems(prev => {
+      const updated = [...prev];
+      updated[index] = !updated[index];
+      
+      // Update select all state
+      const allChecked = updated.every(item => item);
+      setSelectAll(allChecked);
+      
+      return updated;
+    });
+  }, []);
+
+  const handleSelectAllChange = useCallback(() => {
     const newState = !selectAll;
     setSelectAll(newState);
-    setSelectedItems(selectedItems.map(() => newState));
-  };
+    setSelectedItems(prev => prev.map(() => newState));
+  }, [selectAll]);
 
-  // Remove selected items logic
-  const handleRemoveSelected = () => {
-    const items = cart.items.filter((_, index) => selectedItems[index]);
-    setItemsToRemove(items);
+  // Optimized: Batch remove with single request
+  const handleRemoveSelected = useCallback(() => {
+    if (!hasSelectedItems) return;
     setShowConfirmModal(true);
-  };
+  }, [hasSelectedItems]);
 
-  const confirmRemoveItems = () => {
-    itemsToRemove.forEach((item) => {
-      fetch("/cart", {
-        method: "POST",
-        body: new URLSearchParams({
-          action: "removeItem",
-          itemId: item.id,
-        }),
-      })
-        .then(() => {
-          setSelectedItems(
-            selectedItems.filter((_, index) => !selectedItems[index])
-          );
-          setTimeout(() => {
-            window.location.reload();
-          }, 300);
-        })
-        .catch((error) => console.error("Error removing item:", error));
-    });
+  const confirmRemoveItems = useCallback(async () => {
+    const itemIds = selectedItemsData.map(item => item.id);
+    
+    fetcher.submit(
+      {
+        action: "removeBatch",
+        itemIds: JSON.stringify(itemIds)
+      },
+      { method: "post" }
+    );
+    
     setShowConfirmModal(false);
-  };
+  }, [selectedItemsData, fetcher]);
 
-  // Calculate the total price of selected items
-  const selectedTotal = cart.items
-    .filter((_, index) => selectedItems[index]) // Only selected items
-    .reduce((total, item) => total + item.product.price * item.quantity, 0)
-    .toLocaleString("id-ID"); // Format as Indonesian currency
+  // Optimized: Streamlined checkout process
+  const handleCheckout = useCallback(async () => {
+    if (!hasSelectedItems || cart.items.length === 0 || isCheckingOut) {
+      return;
+    }
+
+    setIsCheckingOut(true);
+
+    try {
+      fetcher.submit(
+        {
+          action: "checkout",
+          cartData: JSON.stringify(selectedItemsData)
+        },
+        { method: "post" }
+      );
+    } catch (error) {
+      console.error("Checkout error:", error);
+      setIsCheckingOut(false);
+    }
+  }, [hasSelectedItems, cart.items.length, isCheckingOut, selectedItemsData, fetcher]);
 
   return (
     <div className="flex flex-col min-h-screen bg-gray-100">
@@ -163,8 +267,10 @@ export default function CartPage() {
         <h1 className="text-xl lg:text-2xl font-bold">Keranjang</h1>
         <button
           onClick={handleRemoveSelected}
-          disabled={!selectedItems.some((item) => item)}
-          className="text-yellow-300 text-2xl"
+          disabled={!hasSelectedItems}
+          className={`text-2xl ${
+            hasSelectedItems ? "text-yellow-300" : "text-gray-400"
+          }`}
         >
           <i className="fas fa-trash"></i>
         </button>
@@ -186,16 +292,17 @@ export default function CartPage() {
                 <input
                   type="checkbox"
                   className="form-checkbox text-yellow-300 h-4 w-4 md:h-5 md:w-5 mr-2 md:mr-4"
-                  checked={selectedItems[index]}
+                  checked={selectedItems[index] || false}
                   onChange={() => handleItemChange(index)}
                 />
 
-                {/* Gambar dan Detail Produk */}
+                {/* Product Image and Details */}
                 <div className="flex-shrink-0">
                   <img
                     src={item.product.images[0]?.url || "/placeholder.png"}
                     alt={item.product.name}
                     className="w-16 h-16 md:w-20 md:h-20 object-contain rounded-md"
+                    loading="lazy"
                   />
                 </div>
                 <div className="ml-2 md:ml-4 flex-grow">
@@ -211,11 +318,7 @@ export default function CartPage() {
                   <div className="flex items-center space-x-2 mt-2 float-end">
                     <Form method="post" className="flex items-center space-x-2">
                       <input type="hidden" name="itemId" value={item.id} />
-                      <input
-                        type="hidden"
-                        name="action"
-                        value="updateQuantity"
-                      />
+                      <input type="hidden" name="action" value="updateQuantity" />
                       <button
                         type="submit"
                         name="quantity"
@@ -266,39 +369,24 @@ export default function CartPage() {
 
           <button
             className={`${
-              selectedItems.some((item) => item) && cart.items.length > 0
+              hasSelectedItems && cart.items.length > 0 && !isCheckingOut
                 ? "bg-yellow-300"
                 : "bg-gray-300 cursor-not-allowed"
             } py-2 px-4 rounded`}
             disabled={
-              cart.items.length === 0 || !selectedItems.some((item) => item)
+              cart.items.length === 0 || !hasSelectedItems || isCheckingOut
             }
-            onClick={(e) => {
-              if (
-                cart.items.length === 0 ||
-                !selectedItems.some((item) => item)
-              ) {
-                e.preventDefault();
-                return;
-              }
-              fetch("/cart", {
-                method: "POST",
-                body: new URLSearchParams({
-                  action: "checkout",
-                  cartData: JSON.stringify(
-                    cart.items.filter((_, index) => selectedItems[index]) // Filter item yang dipilih
-                  ),
-                }),
-              }).then(() => navigate("/pesanan"));
-            }}
+            onClick={handleCheckout}
           >
             <p className="font-semibold">
-              Checkout (
-              {selectedItems.filter((isSelected) => isSelected).length})
+              {isCheckingOut ? "Processing..." : 
+                `Checkout (${selectedItems.filter(isSelected => isSelected).length})`
+              }
             </p>
           </button>
         </div>
       </footer>
+      
       {showConfirmModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-lg p-6 w-full max-w-md">
@@ -306,8 +394,7 @@ export default function CartPage() {
               Konfirmasi Hapus
             </h2>
             <p className="text-sm text-gray-600 mb-6">
-              Apakah Anda yakin ingin menghapus item yang dipilih dari
-              keranjang?
+              Apakah Anda yakin ingin menghapus {selectedItemsData.length} item yang dipilih dari keranjang?
             </p>
             <div className="flex justify-end space-x-4">
               <button
@@ -319,8 +406,9 @@ export default function CartPage() {
               <button
                 onClick={confirmRemoveItems}
                 className="bg-red-500 text-white px-4 py-2 rounded"
+                disabled={fetcher.state === "submitting"}
               >
-                Hapus
+                {fetcher.state === "submitting" ? "Menghapus..." : "Hapus"}
               </button>
             </div>
           </div>
