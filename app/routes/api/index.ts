@@ -1,8 +1,9 @@
 import { json } from '@remix-run/node';
 import { sendOTP } from '../../utils/jwt.server';
 import axios from 'axios';
+import type { LoaderFunctionArgs } from '@remix-run/node';
 
-export const loader = async ({ request }) => {
+export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
   const email = url.searchParams.get('email');
   const type = url.searchParams.get("type");
