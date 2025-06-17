@@ -1,7 +1,7 @@
 import { json } from "@remix-run/node";
 import { Link, Outlet, useLoaderData, Form } from "@remix-run/react";
-import type { LoaderFunctionArgs, ActionFunctionArgs } from "@remix-run/node";
-import { requireAdmin, logout } from "~/utils/session.server";
+import type { ActionFunctionArgs } from "@remix-run/node";
+import { logout } from "~/utils/session.server";
 import { AdminSidebar } from "~/routes/components/AdminSidebar";
 import type { User } from "@prisma/client";
 
