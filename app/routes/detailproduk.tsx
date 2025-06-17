@@ -29,7 +29,7 @@ export const loader: LoaderFunction = async ({ request }) => {
     throw new Response("Product not found", { status: 404 });
   }
 
-  return json({ product, username: user.username });
+  return json({ product, userId: user.id });
 };
 
 export const action: ActionFunction = async ({ request }) => {
@@ -44,6 +44,15 @@ export const action: ActionFunction = async ({ request }) => {
 
   if (!productId) {
     return json({ error: "Product ID is required" }, { status: 400 });
+  }
+
+  // Get product to check stock
+  const product = await prisma.product.findUnique({
+    where: { id: productId },
+  });
+
+  if (!product) {
+    return json({ error: "Produk tidak ditemukan" }, { status: 404 });
   }
 
   let cart = await prisma.cart.findUnique({
@@ -61,11 +70,27 @@ export const action: ActionFunction = async ({ request }) => {
   });
 
   if (existingCartItem) {
-    await prisma.cartItem.update({
-      where: { id: existingCartItem.id },
-      data: { quantity: existingCartItem.quantity + 1 },
-    });
+    // If item exists, check if we can add more (only if quantity < stock)
+    if (existingCartItem.quantity < product.stock) {
+      // Update quantity normally
+      await prisma.cartItem.update({
+        where: { id: existingCartItem.id },
+        data: { 
+          quantity: existingCartItem.quantity + 1,
+          updatedAt: new Date() // Update timestamp to sort to top
+        },
+      });
+    } else {
+      // Item exists but stock is full, just update timestamp to move to top
+      await prisma.cartItem.update({
+        where: { id: existingCartItem.id },
+        data: { 
+          updatedAt: new Date() // Only update timestamp to sort to top
+        },
+      });
+    }
   } else {
+    // Create new cart item
     await prisma.cartItem.create({
       data: {
         cartId: cart.id,
@@ -79,11 +104,12 @@ export const action: ActionFunction = async ({ request }) => {
 };
 
 const DetailProdukPage = () => {
-  const { product, username } = useLoaderData<typeof loader>();
+  const { product } = useLoaderData<typeof loader>();
   const [feedback, setFeedback] = useState("");
   const [currentIndex, setCurrentIndex] = useState(0);
   const navigate = useNavigate();
   const [showFeedback, setShowFeedback] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const nextImage = () => {
     setCurrentIndex((prevIndex) =>
@@ -99,45 +125,77 @@ const DetailProdukPage = () => {
 
   const handleAddToCart = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    // Prevent multiple submissions
+    if (isSubmitting) return;
+    
+    setIsSubmitting(true);
+    
     const formData = new FormData(e.currentTarget as HTMLFormElement);
 
-    const response = await fetch(window.location.href, {
-      method: "POST",
-      body: formData,
-    });
+    try {
+      const response = await fetch(window.location.href, {
+        method: "POST",
+        body: formData,
+      });
 
-    if (response.ok) {
-      setFeedback("Produk berhasil ditambahkan ke keranjang!");
+      // Check if response is ok first
+      if (response.ok) {
+        setFeedback("Produk berhasil ditambahkan ke keranjang!");
+      } else {
+        // Try to parse JSON for error message
+        try {
+          const result = await response.json();
+          setFeedback(result.error || "Terjadi kesalahan.");
+        } catch (jsonError) {
+          // If JSON parsing fails, use status-based message
+          if (response.status === 400) {
+            setFeedback("Data tidak valid.");
+          } else if (response.status === 401) {
+            setFeedback("Anda perlu login terlebih dahulu.");
+          } else if (response.status === 404) {
+            setFeedback("Produk tidak ditemukan.");
+          } else {
+            setFeedback("Terjadi kesalahan pada server.");
+          }
+        }
+      }
+      
       setShowFeedback(true);
       setTimeout(() => {
         setShowFeedback(false);
       }, 3000);
-    } else {
-      const result = await response.json();
-      setFeedback(result.error || "Terjadi kesalahan.");
+    } catch (error) {
+      console.error("Network error:", error);
+      setFeedback("Terjadi kesalahan jaringan.");
       setShowFeedback(true);
       setTimeout(() => {
         setShowFeedback(false);
       }, 3000);
+    } finally {
+      // Re-enable button after a short delay to prevent spam
+      setTimeout(() => {
+        setIsSubmitting(false);
+      }, 1000);
     }
   };
 
   return (
     <div className="flex flex-col min-h-screen bg-white relative">
-      {/* Overlay feedback */}
+      {/* Overlay feedback - Fixed z-index issue */}
       {showFeedback && (
-        <div
-          className={`absolute top-0 left-0 w-full flex justify-center items-center z-50 transition-opacity duration-1000 ${
-            showFeedback ? "opacity-100" : "opacity-0"
-          }`}
-        >
-          <div className="bg-green-200 text-green-800 py-2 px-4 rounded shadow-lg">
+        <div className="fixed top-4 left-0 w-full flex justify-center items-center z-[60] pointer-events-none">
+          <div className={`px-4 py-2 rounded shadow-lg transition-opacity duration-300 ${
+            feedback.includes('berhasil') 
+              ? 'bg-green-200 text-green-800' 
+              : 'bg-red-200 text-red-800'
+          }`}>
             {feedback}
           </div>
         </div>
       )}
 
-      <header className="sticky top-0 flex justify-between items-center p-4 bg-white z-10 shadow">
+      <header className="sticky top-0 flex justify-between items-center p-4 bg-white z-50 shadow">
         <button
           onClick={() => navigate(-1)}
           className="w-8 h-8 lg:w-10 lg:h-10 bg-yellow-300 rounded-full flex items-center justify-center"
@@ -177,7 +235,7 @@ const DetailProdukPage = () => {
         </div>
 
         <div className="flex justify-center space-x-2 mb-4">
-          {product.images.map((_, index) => (
+          {product.images.map((_: { url: string }, index: number) => (
             <div
               key={index}
               className={`w-3 h-3 rounded-full ${
@@ -209,24 +267,40 @@ const DetailProdukPage = () => {
             DETAIL PRODUK
           </h2>
           <ul className="list-disc list-inside text-xs sm:text-sm md:text-base text-gray-700 mt-2">
-            {product.description.split("\n").map((detail, index) => (
+            {product.description.split("\n").map((detail: string, index: number) => (
               <li key={index}>{detail}</li>
             ))}
           </ul>
         </div>
       </main>
 
-      <footer className="sticky bottom-0 bg-yellow-300 flex justify-center items-center shadow">
+      <footer className="sticky bottom-0 bg-yellow-300 flex justify-center items-center shadow z-40">
         <form onSubmit={handleAddToCart}>
           <input type="hidden" name="productId" value={product.id} />
           <button
             type="submit"
-            className="text-black text-xs sm:text-sm font-bold py-3 px-6 rounded-full flex flex-col items-center space-y-1"
+            disabled={isSubmitting || product.stock === 0}
+            className={`text-black text-xs sm:text-sm font-bold py-3 px-6 rounded-full flex flex-col items-center space-y-1 transition-opacity ${
+              isSubmitting || product.stock === 0 
+                ? 'opacity-50 cursor-not-allowed' 
+                : 'hover:opacity-80'
+            }`}
           >
             <div className="border-2 border-black rounded-lg pt-1 pb-1 pl-3 pr-3">
-              <i className="fas fa-plus"></i>
+              {isSubmitting ? (
+                <i className="fas fa-spinner fa-spin"></i>
+              ) : (
+                <i className="fas fa-plus"></i>
+              )}
             </div>
-            <span>Tambahkan ke Keranjang</span>
+            <span>
+              {product.stock === 0 
+                ? 'Stok Habis' 
+                : isSubmitting 
+                  ? 'Menambahkan...' 
+                  : 'Tambahkan ke Keranjang'
+              }
+            </span>
           </button>
         </form>
       </footer>
