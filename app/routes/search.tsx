@@ -53,18 +53,22 @@ export const loader: LoaderFunction = async ({ request }) => {
   }
 
   // Query pencarian
-  const whereClause = {
-    AND: [
-      { name: { contains: searchQuery, mode: "insensitive" } },
-      category ? { category: { equals: category, mode: "insensitive" } } : {},
-    ],
+  const whereClause: {
+    isVisible: boolean;
+    name?: { contains: string; mode: "insensitive" };
+    category?: { equals: string; mode: "insensitive" };
+  } = {
+    isVisible: true,
+    ...(searchQuery.trim() && {
+      name: { contains: searchQuery, mode: "insensitive" as const },
+    }),
+    ...(category && {
+      category: { equals: category, mode: "insensitive" as const },
+    }),
   };
 
   const products = await prisma.product.findMany({
-    where: {
-      ...whereClause, // Kondisi tambahan jika ada
-      isVisible: true,
-    }, // Filter untuk produk yang terlihat
+    where: whereClause,
     orderBy: Object.keys(orderBy).length ? orderBy : { createdAt: "asc" },
     include: { images: true },
     take: 100,
@@ -150,7 +154,7 @@ function determineCategory(query: string): string {
 
 // Komponen React untuk menampilkan data
 export default function Search() {
-  const { products, username, searchQuery, category, sortBy } = useLoaderData<{
+  const { products, searchQuery, category, sortBy } = useLoaderData<{
     products: {
       id: string;
       name: string;
@@ -243,8 +247,8 @@ export default function Search() {
         )}
         {searchQuery.trim() !== "" && products.length === 0 && (
           <p className="text-center text-gray-600 mt-4">
-            Tidak ada produk yang ditemukan untuk pencarian "
-            <b>{searchQuery}</b>".
+            Tidak ada produk yang ditemukan untuk pencarian &quot;
+            <b>{searchQuery}</b>&quot;.
           </p>
         )}
         {products.length > 0 && (
