@@ -3,14 +3,25 @@ import { json, LoaderFunction, redirect } from "@remix-run/node";
 import { authenticator } from "~/utils/auth.server";
 import { PrismaClient } from "@prisma/client";
 import { getTemporaryOrder } from "~/utils/orders.server";
-import axios from "axios";
+import { useMemo } from "react";
 
 const prisma = new PrismaClient();
-// Loader: Fetch order data
+
+// Cache untuk location data - simpan di memory untuk menghindari request berulang
+const locationCache = new Map<string, any>();
+
+// Optimized Loader: Paralel execution dan caching
 export const loader: LoaderFunction = async ({ request }) => {
   const user = await authenticator.isAuthenticated(request);
   if (!user) return redirect("/login");
 
+  // Get temporary order data first
+  const orderData = getTemporaryOrder(user.id);
+  if (!orderData) {
+    return redirect("/cart");
+  }
+
+  // Single optimized query untuk user details
   const userDetails = await prisma.user.findUnique({
     where: { id: user.id },
     select: {
@@ -26,136 +37,241 @@ export const loader: LoaderFunction = async ({ request }) => {
     },
   });
 
-  if (!userDetails) {
-    return json("User tidak ditemukan di database.");
-  }
-
-  if (!userDetails.address) {
+  if (!userDetails?.address) {
     return redirect("/account");
   }
 
   const { province, city, district } = userDetails;
 
-  let locationData = { provinceName: null, cityName: null, districtName: null };
+  // Optimized location fetching dengan caching
+  let locationData: { 
+    provinceName: string | null; 
+    cityName: string | null; 
+    districtName: string | null 
+  } = { 
+    provinceName: null, 
+    cityName: null, 
+    districtName: null 
+  };
 
   try {
-    const [provinceRes, cityRes, districtRes] = await Promise.all([
-      axios.get('https://jasonslav.github.io/api-wilayah-indonesia/api/provinces.json'),
-      axios.get(`https://jasonslav.github.io/api-wilayah-indonesia/api/regencies/${province}.json`),
-      axios.get(`https://jasonslav.github.io/api-wilayah-indonesia/api/districts/${city}.json`),
-    ]);
+    const cacheKey = `${province}-${city}-${district}`;
+    
+    // Check cache first
+    if (locationCache.has(cacheKey)) {
+      locationData = locationCache.get(cacheKey);
+    } else {
+      // Optimized: Hanya fetch yang diperlukan, bukan semua data
+      const locationPromises = [];
+      
+      // Hanya fetch province jika belum ada di cache
+      const provinceKey = `province-${province}`;
+      if (!locationCache.has(provinceKey)) {
+        locationPromises.push(
+          fetch('https://jasonslav.github.io/api-wilayah-indonesia/api/provinces.json')
+            .then(res => res.json())
+            .then(data => {
+              locationCache.set(provinceKey, data);
+              return { type: 'province', data };
+            })
+        );
+      }
 
-    locationData = {
-      provinceName: provinceRes.data.find((item: any) => item.id === province)?.name || null,
-      cityName: cityRes.data.find((item: any) => item.id === city)?.name || null,
-      districtName: districtRes.data.find((item: any) => item.id === district)?.name || null,
-    };
+      // Similar untuk city dan district
+      const cityKey = `city-${city}`;
+      if (!locationCache.has(cityKey)) {
+        locationPromises.push(
+          fetch(`https://jasonslav.github.io/api-wilayah-indonesia/api/regencies/${province}.json`)
+            .then(res => res.json())
+            .then(data => {
+              locationCache.set(cityKey, data);
+              return { type: 'city', data };
+            })
+        );
+      }
+
+      const districtKey = `district-${district}`;
+      if (!locationCache.has(districtKey)) {
+        locationPromises.push(
+          fetch(`https://jasonslav.github.io/api-wilayah-indonesia/api/districts/${city}.json`)
+            .then(res => res.json())
+            .then(data => {
+              locationCache.set(districtKey, data);
+              return { type: 'district', data };
+            })
+        );
+      }
+
+      // Execute semua promises sekaligus
+      if (locationPromises.length > 0) {
+        await Promise.allSettled(locationPromises);
+      }
+
+      // Get data dari cache
+      const provinceData = locationCache.get(provinceKey) || [];
+      const cityData = locationCache.get(cityKey) || [];
+      const districtData = locationCache.get(districtKey) || [];
+
+      locationData = {
+        provinceName: provinceData.find((item: any) => item.id === province)?.name || null,
+        cityName: cityData.find((item: any) => item.id === city)?.name || null,
+        districtName: districtData.find((item: any) => item.id === district)?.name || null,
+      };
+
+      // Cache hasil akhir
+      locationCache.set(cacheKey, locationData);
+    }
   } catch (error) {
     console.error("Error fetching location data:", error);
+    // Fallback ke ID jika gagal fetch nama
+    locationData = {
+      provinceName: province,
+      cityName: city,
+      districtName: district,
+    };
   }
 
-  const cartData = await prisma.cart.findUnique({
-    where: { userId: user.id },
-    include: {
-      items: {
-        include: {
-          product: {
-            include: {
-              images: true,
-            },
-          },
-        },
-      },
-    },
-  });
-
-  if (!cartData || cartData.items.length === 0) {
-    return redirect("/cart");
-  }
-
-  const subtotal = cartData.items.reduce(
-    (total, item) => total + item.product.price * item.quantity,
-    0
-  );
-  const shippingCost = 15000;
-  const total = subtotal + shippingCost;
-  const orderData = getTemporaryOrder(user.id);
-
-  if (!orderData) {
-    return redirect("/cart");
-  }
+  // Pre-calculated values dari temporary order
+  const cartData = orderData.cartData;
+  const subtotal = orderData.total - orderData.shippingCost;
+  const shippingCost = orderData.shippingCost;
+  const total = orderData.total;
 
   return json({
     user,
     userDetails,
     locationData,
-    cartData: cartData.items,
+    cartData,
     subtotal,
     shippingCost,
     total,
   });
 };
 
-// Action: Confirm order
-export const action = async ({ request }) => {
+// Optimized Action: Lebih efisien dengan batch operations
+export const action = async ({ request }: { request: Request }) => {
   const user = await authenticator.isAuthenticated(request);
   if (!user) return redirect("/login");
 
+  const orderData = getTemporaryOrder(user.id);
+  if (!orderData) {
+    return redirect("/cart");
+  }
+
   const formData = await request.formData();
-  const userDetails = JSON.parse(formData.get("userDetails"));
-  const locationData = JSON.parse(formData.get("locationData"));
-  const cartData = JSON.parse(formData.get("cartData"));
-  const shippingCost = parseFloat(formData.get("shippingCost"));
+  const userDetails = JSON.parse(formData.get("userDetails") as string);
+  const locationData = JSON.parse(formData.get("locationData") as string);
+  
+  const cartData = orderData.cartData;
+  const shippingCost = orderData.shippingCost;
+  const total = orderData.total;
+  const subtotal = total - shippingCost;
 
-  // Recalculate subtotal
-  const subtotal = cartData.reduce(
-    (total, item) => total + item.product.price * item.quantity,
-    0
-  );
-  const total = subtotal + shippingCost;
+  try {
+    // Optimized transaction dengan minimal queries
+    const result = await prisma.$transaction(async (prisma) => {
+      // Batch create order items
+      const orderItems = cartData.map((item: any) => ({
+        productId: item.product.id,
+        quantity: item.quantity,
+        price: item.product.price,
+      }));
 
-  // Start a Prisma transaction to ensure atomicity
-  const { order, payment } = await prisma.$transaction(async (prisma) => {
-    // Create Order
-    const createdOrder = await prisma.order.create({
-      data: {
-        userId: user.id,
-        totalAmount: total,
-        items: {
-          create: cartData.map((item) => ({
-            productId: item.product.id,
-            quantity: item.quantity,
-            price: item.product.price,
-          })),
+      // Single order creation dengan nested items
+      const createdOrder = await prisma.order.create({
+        data: {
+          userId: user.id,
+          totalAmount: total,
+          items: {
+            create: orderItems,
+          },
         },
-      },
-      include: { items: { include: { product: true } } },
+        select: {
+          id: true,
+          items: {
+            select: {
+              quantity: true,
+              price: true,
+              product: {
+                select: {
+                  name: true,
+                }
+              }
+            }
+          }
+        },
+      });
+
+      // Create payment record
+      await prisma.payment.create({
+        data: {
+          orderId: createdOrder.id,
+          method: "BANK_TRANSFER",
+          status: "PENDING",
+          amount: total,
+        },
+      });
+
+      // Batch operations
+      const productIds = cartData.map((item: any) => item.product.id);
+      const cartItemIds = cartData.map((item: any) => item.id);
+
+      // Parallel execution untuk update dan delete
+      await Promise.all([
+        // Update product visibility
+        prisma.product.updateMany({
+          where: { id: { in: productIds } },
+          data: { isVisible: false },
+        }),
+        // Remove cart items
+        prisma.cartItem.deleteMany({
+          where: { 
+            id: { in: cartItemIds },
+            cart: { userId: user.id }
+          },
+        }),
+      ]);
+
+      return createdOrder;
     });
 
-    // Create Payment record
-    const createdPayment = await prisma.payment.create({
-      data: {
-        orderId: createdOrder.id,
-        method: "BANK_TRANSFER", // Anda bisa mengganti sesuai metode pembayaran yang relevan
-        status: "PENDING",
-        amount: total,
-      },
-    });
+    // Pre-build WhatsApp message untuk menghindari processing di frontend
+    const whatsappMessage = generateWhatsAppMessage(
+      result,
+      userDetails,
+      locationData,
+      subtotal,
+      shippingCost,
+      total
+    );
 
-    const productIds = cartData.map((item) => item.product.id);
-    await prisma.product.updateMany({
-      where: { id: { in: productIds } },
-      data: { isVisible: false },
-    });
+    const whatsappUrl = `https://wa.me/6285707293619?text=${encodeURIComponent(whatsappMessage)}`;
+    return redirect(whatsappUrl);
 
-    // Clear Cart
-    await prisma.cart.delete({ where: { userId: user.id } });
+  } catch (error) {
+    console.error("Order creation failed:", error);
+    return json({ error: "Gagal membuat pesanan" }, { status: 500 });
+  }
+};
 
-    return { order: createdOrder, payment: createdPayment };
-  });
+// Helper function untuk generate WhatsApp message
+function generateWhatsAppMessage(
+  order: any,
+  userDetails: any,
+  locationData: any,
+  subtotal: number,
+  shippingCost: number,
+  total: number
+): string {
+  const itemsList = order.items
+    .map((item: any) =>
+      `- *${item.product.name}*  
+      📦 Qty: ${item.quantity}  
+      💰 Subtotal: Rp ${(item.price * item.quantity).toLocaleString()}`
+    )
+    .join("\n");
 
-  // Generate WhatsApp message and redirect
-  const whatsappMessage = `
+  return `
 *📦 PESANAN-THRIFTEASE 📦*
 =========================
 📄 *Order ID:* ${order.id}
@@ -168,14 +284,7 @@ export const action = async ({ request }) => {
     ${locationData.provinceName} - ${userDetails.postalCode}
 
 🛒 *Detail Pesanan:*
-${order.items
-      .map(
-        (item) =>
-          `- *${item.product.name}*  
-      📦 Qty: ${item.quantity}  
-      💰 Subtotal: Rp ${(item.price * item.quantity).toLocaleString()}`
-      )
-      .join("\n")}
+${itemsList}
 
 =========================
 💵 *Subtotal Produk:* Rp ${subtotal.toLocaleString()}
@@ -188,25 +297,59 @@ Kami akan segera memproses pesanan Anda.
 
 📌 Harap segera lakukan konfirmasi jika ada perubahan informasi.
   `.trim();
+}
 
-  const whatsappUrl = `https://wa.me/6285707293619?text=${encodeURIComponent(
-    whatsappMessage
-  )}`;
-  return redirect(whatsappUrl);
+// Frontend Types
+import type { User } from "@prisma/client";
+
+type LocationData = {
+  provinceName: string | null;
+  cityName: string | null;
+  districtName: string | null;
 };
 
-// Frontend Component
+type CartItem = {
+  id: string;
+  quantity: number;
+  product: {
+    id: string;
+    name: string;
+    price: number;
+    size: string;
+    images: { url: string }[];
+  };
+};
+
+type LoaderData = {
+  user: User;
+  userDetails: Partial<User>;
+  locationData: LocationData;
+  cartData: CartItem[];
+  subtotal: number;
+  shippingCost: number;
+  total: number;
+};
+
+// Optimized Frontend Component
 export default function PesananPage() {
   const { userDetails, locationData, cartData, subtotal, shippingCost, total } =
-    useLoaderData();
+    useLoaderData<LoaderData>();
   const fetcher = useFetcher();
+  const navigate = useNavigate();
+
+  // Memoized calculations untuk performa lebih baik
+  const isSubmitting = useMemo(() => 
+    fetcher.state === "submitting", 
+    [fetcher.state]
+  );
 
   const handleConfirmOrder = () => {
+    if (isSubmitting) return; // Prevent double submission
+    
     fetcher.submit(
       {
         userDetails: JSON.stringify(userDetails),
         locationData: JSON.stringify(locationData),
-        cartData: JSON.stringify(cartData),
         total: total.toString(),
         shippingCost: shippingCost.toString(),
       },
@@ -214,15 +357,20 @@ export default function PesananPage() {
     );
   };
 
-  const navigate = useNavigate(); // For navigating back to the previous page
+  // Memoized address string
+  const fullAddress = useMemo(() => 
+    `${userDetails.address}, ${locationData.districtName}, ${locationData.cityName}, ${locationData.provinceName}, ${userDetails.postalCode}, ID`,
+    [userDetails.address, locationData, userDetails.postalCode]
+  );
 
   return (
     <div className="flex flex-col min-h-screen bg-white">
       {/* Header Sticky with Bottom Border */}
       <header className="sticky top-0 flex items-center border-b border-gray-300 pb-2 lg:pb-4 mb-4 lg:mb-6 w-full px-4 lg:px-8 bg-white pt-4 z-10">
         <button
-          onClick={() => navigate(-1)} // Navigate to the previous page
+          onClick={() => navigate(-1)}
           className="w-8 h-8 lg:w-10 lg:h-10 bg-yellow-300 rounded-full flex items-center justify-center"
+          disabled={isSubmitting}
         >
           <i className="fas fa-arrow-left"></i>
         </button>
@@ -232,48 +380,48 @@ export default function PesananPage() {
       </header>
 
       <main className="flex-grow lg:px-8">
-        {/* User Information */}
+        {/* User Information - Optimized rendering */}
         <div className="p-4">
           <div className="flex">
             <i className="fas fa-map-marker-alt text-yellow-300 text-xl mr-4"></i>
             <h2 className="font-semibold mb-2">Alamat Pengiriman</h2>
           </div>
-          <p>{userDetails.fullName}</p>
-          <p>{userDetails.phoneNumber}</p>
-          <p>
-            {userDetails.address}, {locationData.districtName}, {locationData.cityName},{" "}
-            {locationData.provinceName}, {userDetails.postalCode}, ID
-          </p>
+          <div className="space-y-1">
+            <p>{userDetails.fullName}</p>
+            <p>{userDetails.phoneNumber}</p>
+            <p>{fullAddress}</p>
+          </div>
         </div>
 
         <div className="border-t border-gray-200"></div>
 
+        {/* Products - Optimized dengan lazy loading */}
         <div className="p-4">
           <h2 className="font-semibold mb-2">Produk</h2>
-          {cartData.map((item) => (
-            <div key={item.id} className="p-4 bg-white mb-2 rounded shadow">
-              <div className="flex">
-                <img
-                  src={
-                    item.product.images[0]?.url ||
-                    "https://placehold.co/100x100"
-                  } // Use dynamic image URL or placeholder
-                  alt={item.product.name}
-                  className="w-20 h-20 object-cover rounded-md"
-                />
-                <div className="ml-4 flex-grow">
-                  <p className="font-semibold">{item.product.name}</p>
-                  <p className="text-gray-600">Size: {item.product.size}</p>
-                  <p className="font-semibold mt-2">
-                    Rp {item.product.price.toLocaleString()}
-                  </p>
-                </div>
-                <div className="flex items-end">
-                  <p className="text-gray-600">x{item.quantity}</p>
+          <div className="space-y-2">
+            {cartData.map((item) => (
+              <div key={item.id} className="p-4 bg-white mb-2 rounded shadow">
+                <div className="flex">
+                  <img
+                    src={item.product.images[0]?.url || "https://placehold.co/100x100"}
+                    alt={item.product.name}
+                    className="w-20 h-20 object-cover rounded-md"
+                    loading="lazy"
+                  />
+                  <div className="ml-4 flex-grow">
+                    <p className="font-semibold line-clamp-2">{item.product.name}</p>
+                    <p className="text-gray-600">Size: {item.product.size}</p>
+                    <p className="font-semibold mt-2">
+                      Rp {item.product.price.toLocaleString()}
+                    </p>
+                  </div>
+                  <div className="flex items-end">
+                    <p className="text-gray-600">x{item.quantity}</p>
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
 
         <div className="border-t border-gray-200"></div>
@@ -292,19 +440,22 @@ export default function PesananPage() {
 
         <div className="border-t border-gray-200"></div>
 
+        {/* Payment Details */}
         <div className="p-4">
           <h2 className="font-semibold mb-2">Rincian Pembayaran</h2>
-          <div className="flex justify-between mb-2">
-            <p>Subtotal untuk Produk</p>
-            <p>Rp {(total - shippingCost).toLocaleString()}</p>
-          </div>
-          <div className="flex justify-between mb-2">
-            <p>Subtotal untuk Pengiriman</p>
-            <p>Rp {shippingCost.toLocaleString()}</p>
-          </div>
-          <div className="flex justify-between font-semibold">
-            <p>Total Pembayaran</p>
-            <p>Rp {total.toLocaleString()}</p>
+          <div className="space-y-2">
+            <div className="flex justify-between">
+              <p>Subtotal untuk Produk</p>
+              <p>Rp {subtotal.toLocaleString()}</p>
+            </div>
+            <div className="flex justify-between">
+              <p>Subtotal untuk Pengiriman</p>
+              <p>Rp {shippingCost.toLocaleString()}</p>
+            </div>
+            <div className="flex justify-between font-semibold pt-2 border-t">
+              <p>Total Pembayaran</p>
+              <p>Rp {total.toLocaleString()}</p>
+            </div>
           </div>
         </div>
 
@@ -322,9 +473,14 @@ export default function PesananPage() {
           </div>
           <button
             onClick={handleConfirmOrder}
-            className="bg-yellow-300 text-black font-semibold py-2 px-4 rounded-lg"
+            disabled={isSubmitting}
+            className={`${
+              isSubmitting 
+                ? "bg-gray-300 cursor-not-allowed" 
+                : "bg-yellow-300 hover:bg-yellow-400"
+            } text-black font-semibold py-2 px-4 rounded-lg transition-colors`}
           >
-            Konfirmasi Pesanan
+            {isSubmitting ? "Memproses..." : "Konfirmasi Pesanan"}
           </button>
         </div>
       </footer>
