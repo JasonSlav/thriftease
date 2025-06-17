@@ -9,7 +9,7 @@ const RAJA_ONGKIR_BASE_URL = "https://api.rajaongkir.com/starter";
  * @param {number} id - The ID to look up.
  * @returns {Promise<string>} The name of the province, city, or district.
  */
-export const getRajaOngkirNameById = async (endpoint, id) => {
+export const getRajaOngkirNameById = async (endpoint: string, id: number): Promise<string> => {
   try {
     const response = await axios.get(`${RAJA_ONGKIR_BASE_URL}/${endpoint}`, {
       params: { id },
