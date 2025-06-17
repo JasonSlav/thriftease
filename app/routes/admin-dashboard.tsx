@@ -1,6 +1,11 @@
 import { json } from "@remix-run/node";
-import { useLoaderData, useNavigate, useSearchParams } from "@remix-run/react";
-import { PrismaClient, PaymentStatus  } from "@prisma/client";
+import {
+  useLoaderData,
+  useNavigate,
+  useSearchParams,
+  useNavigation,
+} from "@remix-run/react";
+import { PrismaClient, PaymentStatus } from "@prisma/client";
 import {
   Chart as ChartJS,
   Title,
@@ -15,6 +20,39 @@ import { Line } from "react-chartjs-2";
 import { format } from "date-fns";
 import { jsPDF } from "jspdf";
 import "jspdf-autotable";
+import { useState, useEffect } from "react";
+import {
+  SpinningLoader,
+  LoadingOverlay,
+  DoubleRingSpinner,
+} from "../routes/components/SpinningLoader";
+
+// Extend jsPDF type to include autoTable
+declare module "jspdf" {
+  interface jsPDF {
+    autoTable: (options: {
+      startY?: number;
+      head?: string[][];
+      body?: string[][];
+      theme?: string;
+      styles?: Record<string, unknown>;
+      headStyles?: Record<string, unknown>;
+      bodyStyles?: Record<string, unknown>;
+      columnStyles?: Record<string, Record<string, unknown>>;
+      margin?: { top?: number; right?: number; bottom?: number; left?: number };
+      pageBreak?: string;
+      rowPageBreak?: string;
+      tableWidth?: number | string;
+      showHead?: boolean;
+      showFoot?: boolean;
+      tableLineWidth?: number;
+      tableLineColor?: string | number[];
+    }) => void;
+    lastAutoTable: {
+      finalY: number;
+    };
+  }
+}
 
 // Prisma Client
 const prisma = new PrismaClient();
@@ -30,10 +68,31 @@ ChartJS.register(
   PointElement
 );
 
-// Helper function to group data by date
-// Helper function to group data by date and sort by date ascending
-const groupByDate = (data) => {
-  const grouped = {};
+// Type definitions
+interface DailyData {
+  date: string;
+  count: number;
+}
+
+interface LoaderData {
+  totalTransactions: number;
+  totalOrders: number;
+  totalIncome: number;
+  dailyOrders: DailyData[];
+  dailyTransactions: DailyData[];
+}
+
+interface GroupedData {
+  [key: string]: { count: number };
+}
+
+interface DataItem {
+  createdAt: Date;
+  _count: { id: number };
+}
+
+const groupByDate = (data: DataItem[]): DailyData[] => {
+  const grouped: GroupedData = {};
   data.forEach((item) => {
     const dateKey = format(new Date(item.createdAt), "yyyy-MM-dd");
     if (!grouped[dateKey]) {
@@ -45,11 +104,11 @@ const groupByDate = (data) => {
   // Convert grouped object to sorted array
   return Object.entries(grouped)
     .map(([date, { count }]) => ({ date, count }))
-    .sort((a, b) => new Date(a.date) - new Date(b.date)); // Sort by date ascending
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()); // Sort by date ascending
 };
 
 // Loader function to fetch data
-export const loader = async ({ request }) => {
+export const loader = async ({ request }: { request: Request }) => {
   const url = new URL(request.url);
   const startDate = url.searchParams.get("startDate");
   const endDate = url.searchParams.get("endDate");
@@ -59,10 +118,11 @@ export const loader = async ({ request }) => {
       ? { createdAt: { gte: new Date(startDate), lte: new Date(endDate) } }
       : {};
   const successFilter = { status: PaymentStatus.SUCCESS };
+
   const totalTransactions = await prisma.payment.count({
     where: { ...whereFilter, ...successFilter },
   });
-  
+
   const totalIncome = await prisma.payment.aggregate({
     _sum: { amount: true },
     where: { ...whereFilter, ...successFilter },
@@ -109,9 +169,28 @@ const AdminDashboard = () => {
     totalIncome,
     dailyOrders,
     dailyTransactions,
-  } = useLoaderData();
+  } = useLoaderData<LoaderData>();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigation = useNavigation();
+
+  // Loading states
+  const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
+
+  // Check if page is loading
+  const isPageLoading = navigation.state === "loading";
+  const isSubmitting = navigation.state === "submitting";
+
+  // Handle initial loading state
+  useEffect(() => {
+    // Simulate initial data processing time
+    const timer = setTimeout(() => {
+      setIsInitialLoading(false);
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, []);
 
   const ordersData = {
     labels: dailyOrders.map((order) => order.date),
@@ -138,71 +217,117 @@ const AdminDashboard = () => {
       },
     ],
   };
-  const generatePDF = () => {
-    const doc = new jsPDF();
-    
-    // Judul dokumen
-    doc.setFontSize(18);
-    doc.text("Laporan Dashboard Admin ThriftEase", 10, 10);
-  
-    // Rentang waktu
-    const startDate = searchParams.get("startDate") || "Semua waktu";
-    const endDate = searchParams.get("endDate") || "Semua waktu";
-    doc.setFontSize(12);
-    doc.text(`Rentang Waktu: ${startDate} - ${endDate}`, 10, 20);
-  
-    // Statistik utama
-    doc.text(`Total Pemasukan: Rp. ${totalIncome.toLocaleString()}`, 10, 30);
-    doc.text(`Total Transaksi: ${totalTransactions}`, 10, 40);
-    doc.text(`Total Pesanan: ${totalOrders}`, 10, 50);
-  
-    // Data detail pesanan harian
-    doc.setFontSize(14);
-    doc.text("Detail Pesanan Harian", 10, 60);
-    doc.autoTable({
-      startY: 65,
-      head: [["Tanggal", "Jumlah Pesanan"]],
-      body: dailyOrders.map((order) => [order.date, order.count]),
-    });
-  
-    // Data detail transaksi harian
-    const transactionsStartY = doc.lastAutoTable.finalY + 10;
-    doc.setFontSize(14);
-    doc.text("Detail Transaksi Harian", 10, transactionsStartY);
-    doc.autoTable({
-      startY: transactionsStartY + 5,
-      head: [["Tanggal", "Jumlah Transaksi"]],
-      body: dailyTransactions.map((transaction) => [transaction.date, transaction.count]),
-    });
-  
-    // Unduh PDF
-    doc.save("Laporan-Dashboard-Admin.pdf");
-  };
-  
 
-  const handleFilter = (event) => {
+  const generatePDF = async () => {
+    setIsGeneratingPDF(true);
+
+    try {
+      // Add a small delay to show the loading state
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      const doc = new jsPDF();
+
+      // Judul dokumen
+      doc.setFontSize(18);
+      doc.text("Laporan Dashboard Admin ThriftEase", 10, 10);
+
+      // Rentang waktu
+      const startDate = searchParams.get("startDate") || "Semua waktu";
+      const endDate = searchParams.get("endDate") || "Semua waktu";
+      doc.setFontSize(12);
+      doc.text(`Rentang Waktu: ${startDate} - ${endDate}`, 10, 20);
+
+      // Statistik utama
+      doc.text(`Total Pemasukan: Rp. ${totalIncome.toLocaleString()}`, 10, 30);
+      doc.text(`Total Transaksi: ${totalTransactions}`, 10, 40);
+      doc.text(`Total Pesanan: ${totalOrders}`, 10, 50);
+
+      // Data detail pesanan harian
+      doc.setFontSize(14);
+      doc.text("Detail Pesanan Harian", 10, 60);
+      doc.autoTable({
+        startY: 65,
+        head: [["Tanggal", "Jumlah Pesanan"]],
+        body: dailyOrders.map((order) => [order.date, order.count.toString()]),
+      });
+
+      // Data detail transaksi harian
+      const transactionsStartY = doc.lastAutoTable.finalY + 10;
+      doc.setFontSize(14);
+      doc.text("Detail Transaksi Harian", 10, transactionsStartY);
+      doc.autoTable({
+        startY: transactionsStartY + 5,
+        head: [["Tanggal", "Jumlah Transaksi"]],
+        body: dailyTransactions.map((transaction) => [
+          transaction.date,
+          transaction.count.toString(),
+        ]),
+      });
+
+      // Unduh PDF
+      doc.save("Laporan-Dashboard-Admin.pdf");
+    } catch (error) {
+      console.error("Error generating PDF:", error);
+    } finally {
+      setIsGeneratingPDF(false);
+    }
+  };
+
+  const handleFilter = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const form = new FormData(event.target);
-    const startDate = form.get("startDate");
-    const endDate = form.get("endDate");
-    setSearchParams({ startDate, endDate });
+    const form = new FormData(event.currentTarget);
+    const startDate = form.get("startDate") as string | null;
+    const endDate = form.get("endDate") as string | null;
+
+    const params: Record<string, string> = {};
+    if (startDate) params.startDate = startDate;
+    if (endDate) params.endDate = endDate;
+
+    setSearchParams(params);
   };
 
+  // Show loading overlay during initial loading
+  if (isInitialLoading) {
+    return (
+      <div className="min-h-screen bg-gray-100">
+        <LoadingOverlay
+          isVisible={true}
+          text="Memuat dashboard..."
+          blur={true}
+        />
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-gray-100">
-      <header className="bg-white shadow-md p-4 relative flex justify-center items-center">
-        <button
-          className="absolute left-4 text-2xl text-black bg-yellow-300 w-10 h-10 rounded-full"
-          onClick={() => navigate("/admin-menu")}
-        >
-          <i className="fas fa-bars"></i>
-        </button>
-        <h1 className="text-xl font-bold text-center">ThriftEase Admin</h1>
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-100">
+      {/* Loading Overlay untuk page loading dan submitting */}
+      <LoadingOverlay
+        isVisible={isPageLoading || isSubmitting}
+        text={isSubmitting ? "Memproses filter..." : "Memuat data..."}
+        blur={true}
+      />
+
+      <header className="bg-gradient-to-r from-yellow-400 via-yellow-500 to-orange-400 shadow-xl backdrop-blur-sm">
+        <div className="p-6 relative flex justify-center items-center">
+          <button
+            className="absolute left-6 text-yellow-900 bg-white/30 backdrop-blur-sm w-12 h-12 rounded-xl flex items-center justify-center hover:bg-white/40 transition-all duration-300 shadow-lg hover:shadow-xl transform hover:scale-105 disabled:opacity-50"
+            onClick={() => navigate("/admin-menu")}
+            disabled={isPageLoading || isSubmitting || isGeneratingPDF}
+          >
+            {isPageLoading ? (
+              <SpinningLoader size="small" color="yellow" />
+            ) : (
+              <i className="fas fa-arrow-left text-lg"></i>
+            )}
+          </button>
+          <div className="text-center">
+            <h1 className="text-xl font-bold text-center">ThriftEase Admin</h1>
+            <p className="text-yellow-800/90 text-sm font-medium">Dashboard</p>
+          </div>
+        </div>
       </header>
-      <div className="w-full bg-gray-200 py-2 text-center">
-        <h2 className="text-lg font-semibold">Dashboard</h2>
-      </div>
+
       <main className="w-full flex flex-col items-center mt-6">
         <form
           className="w-full px-6 flex justify-center space-x-4"
@@ -212,29 +337,54 @@ const AdminDashboard = () => {
             type="date"
             name="startDate"
             defaultValue={searchParams.get("startDate") || ""}
-            className="border rounded-md px-4 py-2"
+            className="border rounded-md px-4 py-2 focus:ring-2 focus:ring-yellow-300 transition-all duration-200"
+            disabled={isPageLoading || isSubmitting || isGeneratingPDF}
           />
           <input
             type="date"
             name="endDate"
             defaultValue={searchParams.get("endDate") || ""}
-            className="border rounded-md px-4 py-2"
+            className="border rounded-md px-4 py-2 focus:ring-2 focus:ring-yellow-300 transition-all duration-200"
+            disabled={isPageLoading || isSubmitting || isGeneratingPDF}
           />
           <button
             type="submit"
-            className="bg-yellow-400 text-white px-4 py-2 rounded-md"
+            className="bg-yellow-400 text-white px-4 py-2 rounded-md hover:bg-yellow-500 transition-colors duration-200 relative flex items-center justify-center min-w-[80px]"
+            disabled={isPageLoading || isSubmitting || isGeneratingPDF}
           >
-            Filter
+            {isSubmitting ? (
+              <>
+                <SpinningLoader size="small" color="white" />
+                <span className="ml-2">Filter</span>
+              </>
+            ) : (
+              "Filter"
+            )}
           </button>
         </form>
+
         <button
           onClick={generatePDF}
-          className="mt-4 bg-yellow-400 text-black px-6 py-2 rounded-md"
+          className="mt-4 bg-yellow-400 text-black px-6 py-2 rounded-md hover:bg-yellow-500 transition-colors duration-200 relative flex items-center justify-center min-w-[180px]"
+          disabled={isGeneratingPDF || isPageLoading || isSubmitting}
         >
-          Unduh Laporan PDF
+          {isGeneratingPDF ? (
+            <>
+              <DoubleRingSpinner size="small" />
+              <span className="ml-2">Mengunduh PDF...</span>
+            </>
+          ) : (
+            "Unduh Laporan PDF"
+          )}
         </button>
+
         <div className="w-full flex flex-col sm:flex-row justify-center mt-6 space-y-4 sm:space-y-0 sm:space-x-2">
-          <div className="bg-white shadow-md p-4 rounded-md w-full sm:w-1/2 md:w-1/4">
+          <div className="bg-white shadow-md p-4 rounded-md w-full sm:w-1/2 md:w-1/4 relative">
+            {isPageLoading && (
+              <div className="absolute inset-0 bg-white bg-opacity-70 flex items-center justify-center rounded-md">
+                <SpinningLoader size="medium" color="yellow" />
+              </div>
+            )}
             <h3 className="font-semibold text-base sm:text-lg">
               Total Pemasukan
             </h3>
@@ -245,7 +395,13 @@ const AdminDashboard = () => {
               Dalam rentang waktu
             </p>
           </div>
-          <div className="bg-white shadow-md p-4 rounded-md w-full sm:w-1/2 md:w-1/4">
+
+          <div className="bg-white shadow-md p-4 rounded-md w-full sm:w-1/2 md:w-1/4 relative">
+            {isPageLoading && (
+              <div className="absolute inset-0 bg-white bg-opacity-70 flex items-center justify-center rounded-md">
+                <SpinningLoader size="medium" color="yellow" />
+              </div>
+            )}
             <h3 className="font-semibold text-base sm:text-lg">
               Total Transaksi
             </h3>
@@ -256,7 +412,13 @@ const AdminDashboard = () => {
               Dalam rentang waktu
             </p>
           </div>
-          <div className="bg-white shadow-md p-4 rounded-md w-full sm:w-1/2 md:w-1/4">
+
+          <div className="bg-white shadow-md p-4 rounded-md w-full sm:w-1/2 md:w-1/4 relative">
+            {isPageLoading && (
+              <div className="absolute inset-0 bg-white bg-opacity-70 flex items-center justify-center rounded-md">
+                <SpinningLoader size="medium" color="yellow" />
+              </div>
+            )}
             <h3 className="font-semibold text-base sm:text-lg">
               Total Pesanan
             </h3>
@@ -269,17 +431,38 @@ const AdminDashboard = () => {
           </div>
         </div>
 
-        <div className="w-full mt-6 px-6">
-          <h3 className="text-center text-blue-400 font-semibold">
+        <div className="w-full mt-6 px-6 relative">
+          {isPageLoading && (
+            <div className="absolute inset-0 bg-white bg-opacity-70 flex items-center justify-center z-10 rounded-md">
+              <div className="flex flex-col items-center">
+                <SpinningLoader size="large" color="blue" />
+                <p className="mt-2 text-gray-600">Memuat grafik pesanan...</p>
+              </div>
+            </div>
+          )}
+          <h3 className="text-center text-blue-400 font-semibold mb-4">
             Grafik Total Pesanan
           </h3>
-          <Line data={ordersData} />
+          <div className="bg-white p-4 rounded-md shadow-md">
+            <Line data={ordersData} />
+          </div>
         </div>
-        <div className="w-full mt-6 px-6">
-          <h3 className="text-center text-blue-400 font-semibold">
+
+        <div className="w-full mt-6 px-6 mb-6 relative">
+          {isPageLoading && (
+            <div className="absolute inset-0 bg-white bg-opacity-70 flex items-center justify-center z-10 rounded-md">
+              <div className="flex flex-col items-center">
+                <SpinningLoader size="large" color="red" />
+                <p className="mt-2 text-gray-600">Memuat grafik transaksi...</p>
+              </div>
+            </div>
+          )}
+          <h3 className="text-center text-blue-400 font-semibold mb-4">
             Grafik Total Transaksi
           </h3>
-          <Line data={transactionsData} />
+          <div className="bg-white p-4 rounded-md shadow-md">
+            <Line data={transactionsData} />
+          </div>
         </div>
       </main>
     </div>
