@@ -25,8 +25,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   return { user, name: userDetails.username };
 };
 
+type LoaderData = {
+  name: string;
+};
+
 const ProfilePage = () => {
-  const { user, name } = useLoaderData();
+  const { name } = useLoaderData<LoaderData>();
   const navigate = useNavigate(); // Initialize useNavigate
   const [showLogoutPopup, setShowLogoutPopup] = useState(false); // State untuk popup logout
 
@@ -117,21 +121,42 @@ const ProfilePage = () => {
       <footer className="bottom-0 w-full bg-yellow-300 p-4 flex justify-around items-center z-10 sticky">
         <div
           className="flex flex-col items-center cursor-pointer"
+          role="button"
+          tabIndex={0}
           onClick={() => navigate("/")} // Navigate to /home
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              navigate("/");
+            }
+          }}
         >
           <i className="fas fa-home text-2xl text-white"></i>
           <span className="text-white text-sm font-bold">Beranda</span>
         </div>
         <div
           className="flex flex-col items-center cursor-pointer"
+          role="button"
+          tabIndex={0}
           onClick={() => navigate("/cart")} // Navigate to /keranjang
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              navigate("/cart");
+            }
+          }}
         >
           <i className="fas fa-shopping-cart text-2xl text-white"></i>
           <span className="text-white text-sm font-bold">Keranjang</span>
         </div>
         <div
           className="flex flex-col items-center cursor-pointer"
+          role="button"
+          tabIndex={0}
           onClick={() => navigate("/profile")} // Navigate to /profile
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              navigate("/profile");
+            }
+          }}
         >
           <i className="fas fa-user text-2xl text-white"></i>
           <span className="text-white text-sm font-bold">Saya</span>
