@@ -22,16 +22,20 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 
   // Query pencarian
-  const whereClause = {
-    AND: [
-      {
-        name: {
-          contains: searchQuery,
-          mode: "insensitive",
-        },
+  const whereClause: {
+    name: { contains: string; mode: "insensitive" };
+    category?: { equals: string; mode: "insensitive" };
+  } = {
+    name: {
+      contains: searchQuery,
+      mode: "insensitive",
+    },
+    ...(category && {
+      category: {
+        equals: category,
+        mode: "insensitive",
       },
-      category ? { category: { equals: category, mode: "insensitive" } } : {},
-    ],
+    }),
   };
 
   // Fetch produk yang sesuai dengan pencarian, kategori, dan pengurutan
