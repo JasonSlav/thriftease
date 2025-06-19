@@ -1,9 +1,9 @@
 import { useState, useEffect } from "react";
-import { Form, useNavigate, useActionData } from "@remix-run/react";
+import { Form, useNavigate, useActionData, useNavigation } from "@remix-run/react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json, redirect } from "@remix-run/node";
-import { authenticator } from "~/utils/auth.server";
-import { createUserSession, getSession } from "~/utils/session.server";
+import { authenticator } from "../utils/auth.server";
+import { createUserSession} from "../utils/session.server";
 import image from "../foto/pngwing.com(6).png";
 
 // Loader Function
@@ -31,6 +31,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       throw error; // Tangani redirect jika menggunakan failureRedirect
     } else if (error instanceof Error) {
       console.log("Error:", error.message); // Debugging log
+      
+      // Check for specific authentication errors
+      if (error.message.includes("Invalid credentials") || 
+          error.message.includes("User not found") ||
+          error.message.includes("Incorrect password") ||
+          error.message.includes("Authentication failed")) {
+        return json({ error: "InvalidCredentials" }, { status: 401 });
+      }
+      
       return json({ error: error.message }, { status: 401 });
     } else {
       return json({ error: "Unknown error" }, { status: 401 });
@@ -41,21 +50,103 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 // Login Component
 const LoginPage = () => {
   const [showPassword, setShowPassword] = useState(false);
-  const [formSubmitted, setFormSubmitted] = useState(false);
   const [showErrorPopup, setShowErrorPopup] = useState(false);
+  const [inputErrors, setInputErrors] = useState({
+    login: false,
+    password: false
+  });
   const actionData = useActionData<{ error?: string }>();
-  const errorMessage = actionData?.error;
+  const navigation = useNavigation();
   const navigate = useNavigate();
 
+  const isSubmitting = navigation.state === "submitting";
+
   useEffect(() => {
-    if (formSubmitted && errorMessage) {
+    if (actionData?.error && !isSubmitting) {
       setShowErrorPopup(true);
-      setFormSubmitted(false); // Reset `formSubmitted` setelah pop-up muncul
+      
+      // Highlight input fields when there's an error
+      if (actionData.error === "InvalidCredentials") {
+        setInputErrors({
+          login: true,
+          password: true
+        });
+      } else {
+        setInputErrors({
+          login: true,
+          password: true
+        });
+      }
+    } else {
+      // Reset input errors if no error
+      setInputErrors({
+        login: false,
+        password: false
+      });
     }
-  }, [formSubmitted, errorMessage]);
+  }, [actionData?.error, isSubmitting]);
 
   const togglePasswordVisibility = () => {
     setShowPassword((prevState) => !prevState);
+  };
+
+  const handleInputChange = () => {
+    // Reset input errors when user starts typing
+    if (inputErrors.login || inputErrors.password) {
+      setInputErrors({
+        login: false,
+        password: false
+      });
+    }
+  };
+
+  const closeErrorPopup = () => {
+    setShowErrorPopup(false);
+  };
+
+  const getErrorMessage = () => {
+    switch (actionData?.error) {
+      case "Unauthorized":
+        return "Anda tidak memiliki akses admin. Silakan gunakan akun admin yang valid.";
+      case "InvalidCredentials":
+        return "Username atau password yang Anda masukkan salah. Silakan periksa kembali dan coba lagi.";
+      default:
+        return actionData?.error || "Terjadi kesalahan saat login. Silakan coba lagi.";
+    }
+  };
+
+  const getErrorTitle = () => {
+    switch (actionData?.error) {
+      case "Unauthorized":
+        return "Akses Ditolak";
+      case "InvalidCredentials":
+        return "Login Gagal";
+      default:
+        return "Terjadi Kesalahan";
+    }
+  };
+
+  const getErrorIcon = () => {
+    switch (actionData?.error) {
+      case "Unauthorized":
+        return (
+          <svg className="w-16 h-16 mx-auto" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>
+          </svg>
+        );
+      case "InvalidCredentials":
+        return (
+          <svg className="w-16 h-16 mx-auto" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728L5.636 5.636m12.728 12.728L18.364 5.636M5.636 18.364l12.728-12.728"></path>
+          </svg>
+        );
+      default:
+        return (
+          <svg className="w-16 h-16 mx-auto" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+          </svg>
+        );
+    }
   };
 
   return (
@@ -67,51 +158,104 @@ const LoginPage = () => {
         <h1 className="text-2xl font-bold mb-6">Login Account</h1>
 
         <Form action="/login" method="post" className="w-full">
-          <div className="flex items-center border border-black rounded-lg p-2 mb-4">
-            <i className="fa fa-user text-gray-400 mr-2"></i>
+          <div className={`flex items-center border rounded-lg p-2 mb-4 transition-colors duration-200 ${
+            inputErrors.login 
+              ? 'border-red-500 bg-red-50' 
+              : 'border-black hover:border-gray-600 focus-within:border-blue-500'
+          }`}>
+            <i className={`fa fa-user mr-2 ${inputErrors.login ? 'text-red-500' : 'text-gray-400'}`}></i>
             <input
               type="text"
               name="login"
               placeholder="Email/Username"
               required
-              className="flex-1 outline-none text-gray-500"
+              disabled={isSubmitting}
+              onChange={handleInputChange}
+              className={`flex-1 outline-none disabled:bg-gray-100 ${
+                inputErrors.login 
+                  ? 'text-red-700 placeholder-red-400 bg-red-50' 
+                  : 'text-gray-500'
+              }`}
             />
           </div>
-          <div className="flex items-center border border-black rounded-lg p-2 mb-2">
-            <i className="fas fa-lock text-gray-400 mr-2"></i>
+          
+          <div className={`flex items-center border rounded-lg p-2 mb-2 transition-colors duration-200 ${
+            inputErrors.password 
+              ? 'border-red-500 bg-red-50' 
+              : 'border-black hover:border-gray-600 focus-within:border-blue-500'
+          }`}>
+            <i className={`fas fa-lock mr-2 ${inputErrors.password ? 'text-red-500' : 'text-gray-400'}`}></i>
             <input
               type={showPassword ? "text" : "password"}
               name="password"
               required
               placeholder="Password"
-              className="flex-1 outline-none text-gray-500"
+              disabled={isSubmitting}
+              onChange={handleInputChange}
+              className={`flex-1 outline-none disabled:bg-gray-100 ${
+                inputErrors.password 
+                  ? 'text-red-700 placeholder-red-400 bg-red-50' 
+                  : 'text-gray-500'
+              }`}
             />
-            <i
-              className={`fas ${showPassword ? "fa-eye-slash" : "fa-eye"
-                } text-gray-400 cursor-pointer`}
+            <button
+              type="button"
+              aria-label={showPassword ? "Sembunyikan password" : "Tampilkan password"}
+              className="focus:outline-none ml-2"
               onClick={togglePasswordVisibility}
-            ></i>
+              disabled={isSubmitting}
+              tabIndex={0}
+            >
+              <i
+                className={`fas ${showPassword ? "fa-eye-slash" : "fa-eye"} ${
+                  inputErrors.password ? 'text-red-500' : 'text-gray-400'
+                }`}
+                aria-hidden="true"
+              ></i>
+            </button>
           </div>
+
+          {/* Inline error message */}
+          {actionData?.error && !showErrorPopup && (
+            <div className="text-red-600 text-sm mb-3 p-2 bg-red-50 border border-red-200 rounded flex items-center">
+              <i className="fas fa-exclamation-triangle mr-2"></i>
+              <span>{getErrorMessage()}</span>
+            </div>
+          )}
+
           <button
             type="button"
-            className="float-right mb-2 text-gray-300"
+            className="float-right mb-2 text-gray-300 hover:text-gray-500 disabled:pointer-events-none"
             onClick={() => navigate("/forgot-password")}
+            disabled={isSubmitting}
           >
             Lupa sandi ?
           </button>
 
           <button
             type="submit"
-            className="w-full bg-yellow-300 text-black font-bold py-2 rounded-lg mb-6 shadow-lg"
+            disabled={isSubmitting}
+            className="w-full bg-yellow-300 text-black font-bold py-2 rounded-lg mb-6 shadow-lg hover:bg-yellow-400 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors duration-200"
           >
-            Login
+            {isSubmitting ? (
+              <div className="flex items-center justify-center">
+                <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-black" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                Memproses...
+              </div>
+            ) : (
+              "Login"
+            )}
           </button>
         </Form>
 
         <Form action="/auth/google" method="post" className="w-full">
           <button
             type="submit"
-            className="w-full bg-white text-black font-bold py-2 rounded-lg mb-6 shadow-lg flex items-center justify-center space-x-2"
+            disabled={isSubmitting}
+            className="w-full bg-white text-black font-bold py-2 rounded-lg mb-6 shadow-lg flex items-center justify-center space-x-2 hover:bg-gray-50 disabled:bg-gray-100 disabled:cursor-not-allowed transition-colors duration-200"
           >
             <img src={image} alt="Google Logo" className="w-5 h-5" />
             <span>Login dengan Google</span>
@@ -123,7 +267,8 @@ const LoginPage = () => {
           <button
             type="button"
             onClick={() => navigate("/register")}
-            className="text-yellow-300 font-bold underline"
+            disabled={isSubmitting}
+            className="text-yellow-300 font-bold underline hover:text-yellow-400 disabled:pointer-events-none"
           >
             Buat akun
           </button>
@@ -134,23 +279,66 @@ const LoginPage = () => {
           </p>
         </div>
 
-        {/* Pop-up Error */}
-        {showErrorPopup && (
-          <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50">
-            <div className="bg-white border-2 border-red-600 p-6 rounded-lg w-80 text-center">
+        {/* Enhanced Error Popup with specific handling for Invalid Credentials */}
+        {showErrorPopup && actionData?.error && (
+          <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-50">
+            <div className="bg-white border-2 border-red-600 p-6 rounded-lg w-80 max-w-sm mx-4 text-center shadow-2xl">
               <div className="text-red-600 mb-4">
-                <svg className="w-16 h-16 mx-auto" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12"></path>
-                </svg>
+                {getErrorIcon()}
               </div>
-              <h2 className="text-xl font-semibold text-red-600 mb-2">Daftar Gagal</h2>
-              <p className="text-gray-600">{errorMessage || 'Pastikan semua data sudah diisi dengan benar.'}</p>
-              <button
-                className="mt-4 bg-red-600 text-white px-4 py-2 rounded"
-                onClick={() => setShowErrorPopup(false)}
-              >
-                Tutup
-              </button>
+              <h2 className="text-xl font-semibold text-red-600 mb-2">
+                {getErrorTitle()}
+              </h2>
+              <p className="text-gray-600 mb-4 text-sm leading-relaxed">
+                {getErrorMessage()}
+              </p>
+              
+              <div className="flex flex-col space-y-2">
+                {actionData.error === "InvalidCredentials" ? (
+                  <>
+                    <button
+                      className="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 transition-colors duration-200"
+                      onClick={closeErrorPopup}
+                    >
+                      Coba Lagi
+                    </button>
+                    <button
+                      className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 transition-colors duration-200"
+                      onClick={() => {
+                        setShowErrorPopup(false);
+                        navigate("/forgot-password");
+                      }}
+                    >
+                      Lupa Password?
+                    </button>
+                  </>
+                ) : actionData.error === "Unauthorized" ? (
+                  <>
+                    <button
+                      className="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 transition-colors duration-200"
+                      onClick={closeErrorPopup}
+                    >
+                      Coba Lagi
+                    </button>
+                    <button
+                      className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 transition-colors duration-200"
+                      onClick={() => {
+                        setShowErrorPopup(false);
+                        navigate("/login"); // Navigate to regular user login
+                      }}
+                    >
+                      Login sebagai User
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    className="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 transition-colors duration-200"
+                    onClick={closeErrorPopup}
+                  >
+                    Tutup
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         )}
